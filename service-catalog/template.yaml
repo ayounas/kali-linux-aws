@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Kali Linux Security Instance with auto-termination'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC ID where the Kali instance will be deployed
+  
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: The Subnet ID where the Kali instance will be deployed
+  
+  PrivateIp:
+    Type: String
+    Description: The private IP address to assign to the instance (leave blank for auto-assign)
+    Default: ""
+  
+  InstanceType:
+    Type: String
+    Description: The EC2 instance type for Kali Linux
+    Default: t3.medium
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - m5.large
+      - m5.xlarge
+      - c5.large
+      - c5.xlarge
+  
+  KeyName:
+    Type: String
+    Description: SSH Key Pair for emergency access (using SSM is preferred)
+    Default: ""
+  
+  RootVolumeSize:
+    Type: Number
+    Description: Size of the root EBS volume in GB
+    Default: 30
+    MinValue: 20
+    MaxValue: 100
+  
+  AutoTerminationTime:
+    Type: Number
+    Description: Time in hours after which the instance will be automatically terminated (1-168 hours)
+    Default: 24
+    MinValue: 1
+    MaxValue: 168
+  
+  NamePrefix:
+    Type: String
+    Description: Prefix to be used in resource naming
+    Default: kali
+  
+  Environment:
+    Type: String
+    Description: Environment name for tagging resources
+    Default: security
+    AllowedValues:
+      - security
+      - development
+      - testing
+      - production
+      
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket containing Terraform artifacts
+    Default: "service-catalog-artifacts"
+    
+  S3Key:
+    Type: String
+    Description: S3 key path to the Terraform zip file
+    Default: "kali-linux-aws/1.0.0/terraform.zip"
+
+Resources:
+  KaliServiceCatalogProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProduct
+    Properties:
+      Name: !Sub "${AWS::StackName}-product"
+      Description: A Kali Linux instance for security operations with SSM integration, CloudWatch logging, and auto-termination
+      Owner: Security Team
+      SupportDescription: For support, contact the Security Team
+      Distributor: Security Team
+      ProvisioningArtifactParameters:
+        - Name: v1.0
+          Description: Initial version
+          Info:
+            LoadTemplateFromURL: !Sub "https://s3.${AWS::Region}.amazonaws.com/${S3BucketName}/${S3Key}"
+      
+  KaliServiceCatalogPortfolio:
+    Type: AWS::ServiceCatalog::Portfolio
+    Properties:
+      DisplayName: !Sub "${AWS::StackName}-portfolio"
+      Description: Portfolio containing security tools and resources
+      ProviderName: Security Team
+      
+  KaliServiceCatalogProductAssociation:
+    Type: AWS::ServiceCatalog::PortfolioProductAssociation
+    Properties:
+      PortfolioId: !Ref KaliServiceCatalogPortfolio
+      ProductId: !Ref KaliServiceCatalogProduct
+      
+  KaliServiceCatalogLaunchConstraint:
+    Type: AWS::ServiceCatalog::LaunchRoleConstraint
+    Properties:
+      PortfolioId: !Ref KaliServiceCatalogPortfolio
+      ProductId: !Ref KaliServiceCatalogProduct
+      RoleArn: !GetAtt ServiceCatalogLaunchRole.Arn
+  
+  # S3 bucket for meta-meta access logs (for the meta-logging bucket)
+  MetaMetaLoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-meta-meta-logs-${AWS::AccountId}-${AWS::Region}"
+      AccessControl: LogDeliveryWrite
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Self-logging configuration - the bucket logs to itself as a special case
+      # This is an accepted pattern for the top-level logging bucket
+      LoggingConfiguration:
+        DestinationBucketName: !Ref MetaMetaLoggingBucket
+        LogFilePrefix: "meta-meta-self-logs/"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 365
+
+  # S3 bucket for logging of access logs (meta-logging)
+  MetaLoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-meta-logs-${AWS::AccountId}-${AWS::Region}"
+      AccessControl: LogDeliveryWrite
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Add logging configuration for the meta-logging bucket itself
+      LoggingConfiguration:
+        DestinationBucketName: !Ref MetaMetaLoggingBucket
+        LogFilePrefix: "meta-logs-bucket/"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 365
+  
+  # S3 bucket for access logs
+  LoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-access-logs-${AWS::AccountId}-${AWS::Region}"
+      AccessControl: LogDeliveryWrite
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Add logging configuration for the logging bucket itself
+      LoggingConfiguration:
+        DestinationBucketName: !Ref MetaLoggingBucket
+        LogFilePrefix: "access-logs-bucket/"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 365
+      
+  S3BucketForTerraform:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-terraform-artifacts-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Add S3 access logging configuration
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: "terraform-artifacts-logs/"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 365
+            
+  ServiceCatalogLaunchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-service-catalog-launch-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: servicecatalog.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      
+Outputs:
+  ServiceCatalogPortfolioId:
+    Description: The ID of the Service Catalog Portfolio
+    Value: !Ref KaliServiceCatalogPortfolio
+    
+  ServiceCatalogProductId:
+    Description: The ID of the Service Catalog Product
+    Value: !Ref KaliServiceCatalogProduct
